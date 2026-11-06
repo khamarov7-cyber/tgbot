@@ -207,8 +207,13 @@ def _download_ytdlp_sync(url: str, mode: str) -> str:
         return path
 
 def _download_sync(url: str, mode: str) -> str:
-    if "instagram.com" in url: return _download_instagram_sync(url)
-    else: return _download_ytdlp_sync(url, mode)
+    if "/stories/" in url:
+        return _download_instagram_sync(url)
+    else:
+        try:
+            return _download_ytdlp_sync(url, mode)
+        except Exception:
+            return _download_instagram_sync(url)
 
 # ============================================================
 #  SHAZAM (MUSIQA ANIQLASH)
