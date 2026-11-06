@@ -2,3 +2,5 @@ aiogram
 yt-dlp
 fastapi
 uvicorn
+instaloader
+shazamio
