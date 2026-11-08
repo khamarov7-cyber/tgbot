@@ -5,7 +5,6 @@ import asyncio
 import sqlite3
 import yt_dlp
 import subprocess
-import tempfile
 from shazamio import Shazam
 from datetime import datetime
 from fastapi import FastAPI, Request
@@ -26,13 +25,6 @@ ADMIN_ID = 8389911714  # <--- O'zingizning ID raqamingizni yozing!
 BASE_WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 
-# COOKIES SOZLAMASI
-IG_COOKIES = os.environ.get("IG_COOKIES", "")
-COOKIE_FILE_PATH = "/tmp/ig_cookies.txt"
-if IG_COOKIES:
-    with open(COOKIE_FILE_PATH, "w", encoding="utf-8") as f:
-        f.write(IG_COOKIES)
-
 DOWNLOAD_DIR = "/tmp/tgbot"
 MAX_FILE_SIZE = 50 * 1024 * 1024
 DAILY_LIMIT = 3
@@ -48,7 +40,7 @@ file_cache = {}
 maintenance_mode = False 
 
 # ============================================================
-#  MA'LUMOTLAR BAZASI (O'zgarmadi)
+#  MA'LUMOTLAR BAZASI
 # ============================================================
 def init_db():
     conn = sqlite3.connect('bot_data.db')
@@ -96,7 +88,7 @@ def increment_limit(user_id):
     db_query("UPDATE users SET limit_used = limit_used + 1 WHERE user_id=?", (user_id,))
 
 # ============================================================
-#  OBUNA VA MIDDLEWARE (O'zgarmadi)
+#  MIDDLEWARE
 # ============================================================
 async def get_not_subscribed(user_id: int) -> list:
     channels = db_query("SELECT channel_id, name, url FROM channels")
@@ -136,45 +128,36 @@ dp.message.middleware(MainMiddleware())
 dp.callback_query.middleware(MainMiddleware())
 
 # ============================================================
-#  YUKLASH (YANGILANDI: COOKIES BILAN)
+#  YUKLASH MANTIG'I
 # ============================================================
-def _download_sync(url: str, mode: str) -> str:
+def _download_video_sync(url: str) -> str:
     uid = uuid.uuid4().hex[:8]
     outtmpl = os.path.join(DOWNLOAD_DIR, f"{uid}_%(id)s.%(ext)s")
-    
-    if mode == "audio":
-        opts = {
-            "format": "bestaudio/best", 
-            "outtmpl": outtmpl, 
-            "quiet": True, 
-            "noplaylist": True,
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-        }
-    else:
-        opts = {
-            "format": "best[filesize<45M]/best[height<=480]/best", 
-            "outtmpl": outtmpl, 
-            "quiet": True, 
-            "noplaylist": True,
-        }
-
-    # COOKIES QO'SHISH
-    if os.path.exists(COOKIE_FILE_PATH) and "instagram.com" in url:
-        opts['cookiefile'] = COOKIE_FILE_PATH
-
+    opts = {"format": "best[filesize<45M]/best[height<=480]/best", "outtmpl": outtmpl, "quiet": True, "noplaylist": True}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         path = ydl.prepare_filename(info)
-        
-        # Kengaytmani tekshirish (mp3 ga o'zgargan bo'lishi mumkin)
         if not os.path.exists(path):
             base = os.path.splitext(path)[0]
-            for ext in (".mp3", ".m4a", ".mp4", ".webm", ".mkv", ".mov"):
+            for ext in (".mp4", ".webm", ".mkv", ".mov"):
                 if os.path.exists(base + ext): return base + ext
         return path
 
+def _download_audio_sync(url: str) -> str:
+    uid = uuid.uuid4().hex[:8]
+    outtmpl = os.path.join(DOWNLOAD_DIR, f"{uid}_%(id)s.%(ext)s")
+    opts = {"format": "bestaudio/best", "outtmpl": outtmpl, "quiet": True, "noplaylist": True,
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        path = ydl.prepare_filename(info)
+        if not os.path.exists(path):
+            base = os.path.splitext(path)[0]
+            if os.path.exists(base + ".mp3"): return base + ".mp3"
+        return path
+
 # ============================================================
-#  SHAZAM (MUSIQA ANIQLASH)
+#  SHAZAM VA YOUTUBE QIDIRUV
 # ============================================================
 def _recognize_music_sync(video_path: str) -> str:
     audio_path = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4().hex[:8]}.mp3")
@@ -190,13 +173,32 @@ def _recognize_music_sync(video_path: str) -> str:
         if 'track' in out:
             title = out['track'].get('title', 'Noma\'lum')
             subtitle = out['track'].get('subtitle', 'Noma\'lum')
-            return f"🎵 <b>Qo'shiq:</b> {title}\n👤 <b>Ijrochi:</b> {subtitle}"
-        return "😔 Afsus, bu musiqani topa olmadim."
+            return f"{subtitle} - {title}" # YouTube qidiruvi uchun format
+        return None
     except Exception as e:
         print(f"Shazam xatosi: {e}")
-        return "😔 Musiqa aniqlashda xatolik yuz berdi."
+        return None
     finally:
         if os.path.exists(audio_path): os.remove(audio_path)
+
+def _download_from_youtube_sync(query: str) -> str:
+    uid = uuid.uuid4().hex[:8]
+    outtmpl = os.path.join(DOWNLOAD_DIR, f"yt_{uid}_%(id)s.%(ext)s")
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "noplaylist": True,
+        "default_search": "ytsearch1",
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(query, download=True)
+        path = ydl.prepare_filename(info)
+        if not os.path.exists(path):
+            base = os.path.splitext(path)[0]
+            if os.path.exists(base + ".mp3"): return base + ".mp3"
+        return path
 
 # ============================================================
 #  FOYDALANUVCHI HANDLERLARI
@@ -217,7 +219,7 @@ async def cmd_start(message: types.Message):
     ref_link = f"https://t.me/{bot_username}?start={message.from_user.id}"
     text = (f"👋 Salom, <b>{message.from_user.first_name}</b>!\n\n"
             f"📥 Menga havola tashlang, videoni yuklab beraman.\n"
-            f"🎵 Video ostidagi tugmalar orqali musiqasini aniqlashingiz yoki HD faylini olishingiz mumkin.\n\n"
+            f"🎵 Video ostidagi tugma orqali musiqani to'liq versiyasini yuklab olishingiz mumkin.\n\n"
             f"🎁 <b>Do'stlaringizni taklif qiling!</b>\nHar bir taklif uchun +{REFERRAL_BONUS} ta limit oling:\n<code>{ref_link}</code>")
     await message.answer(text, parse_mode="HTML")
 
@@ -240,8 +242,8 @@ async def handle_link(message: types.Message):
     status = await message.answer("⏳ Video yuklanmoqda, kuting...")
     file_path = None
     try:
-        file_path = await asyncio.to_thread(_download_sync, text, "video")
-        if not file_path or not os.path.exists(file_path): return await status.edit_text("😔 Yuklab bo'lmadi. (Ehtimol, video yopiq yoki login talab qiladi).")
+        file_path = await asyncio.to_thread(_download_video_sync, text)
+        if not file_path or not os.path.exists(file_path): return await status.edit_text("😔 Yuklab bo'lmadi.")
         if os.path.getsize(file_path) > MAX_FILE_SIZE: return await status.edit_text("😔 Video 50 MB dan katta.")
 
         session_id = str(uuid.uuid4())[:8]
@@ -250,9 +252,8 @@ async def handle_link(message: types.Message):
         increment_limit(message.from_user.id)
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎵 Musiqa (MP3)", callback_data=f"audio_{session_id}"),
-             InlineKeyboardButton(text="📁 HD Fayl", callback_data=f"doc_{session_id}")],
-            [InlineKeyboardButton(text="🔍 Qo'shiqni aniqlash (Shazam)", callback_data=f"shazam_{session_id}")]
+            [InlineKeyboardButton(text="🎵 Musiqa (To'liq versiya)", callback_data=f"audio_{session_id}"),
+             InlineKeyboardButton(text="📁 HD Fayl", callback_data=f"doc_{session_id}")]
         ])
         
         bot_username = (await bot.get_me()).username
@@ -269,32 +270,41 @@ async def process_audio(cq: CallbackQuery):
     url = audio_cache.get(cq.data.split("_")[1])
     if not url: return await cq.answer("❌ Havola eskirgan.", show_alert=True)
     
-    await cq.answer("⏳ Audio yuklanmoqda...")
+    await cq.answer("⏳ Qo'shiq aniqlanmoqda...")
     try: await cq.message.edit_reply_markup(reply_markup=None)
     except: pass
     
-    status_msg = await cq.message.reply("🎵 Musiqa yuklanmoqda...")
+    status_msg = await cq.message.reply("🎧 Ovoz tinglanmoqda va qo'shiq nomi aniqlanmoqda...")
+    video_path = None
     file_path = None
+    
     try:
-        file_path = await asyncio.to_thread(_download_sync, url, "audio")
+        # 1. Videoni yuklab olamiz
+        video_path = await asyncio.to_thread(_download_video_sync, url)
+        if not video_path: return await status_msg.edit_text("😔 Videoni yuklab bo'lmadi.")
+
+        # 2. Shazam orqali qo'shiqni aniqlaymiz
+        search_query = await asyncio.to_thread(_recognize_music_sync, video_path)
         
-        # Agar fayl .mp3 bo'lmasa, ffmpeg orqali majburan mp3 qilamiz
-        if file_path and not file_path.endswith('.mp3'):
-            audio_path = file_path.rsplit('.', 1)[0] + ".mp3"
-            await asyncio.to_thread(subprocess.run, ["ffmpeg", "-i", file_path, "-q:a", "0", "-map", "a", audio_path, "-y"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(audio_path):
-                os.remove(file_path)
-                file_path = audio_path
+        if not search_query:
+            return await status_msg.edit_text("😔 Afsus, bu musiqani Shazam bazasidan topa olmadim.")
+
+        await status_msg.edit_text(f"🎵 <b>{search_query}</b> topildi!\n📥 To'liq versiyasi yuklanmoqda...", parse_mode="HTML")
+        
+        # 3. YouTube'dan to'liq qo'shiqni yuklaymiz
+        file_path = await asyncio.to_thread(_download_from_youtube_sync, search_query)
 
         if file_path and os.path.exists(file_path) and os.path.getsize(file_path) <= MAX_FILE_SIZE:
-            await cq.message.answer_audio(audio=FSInputFile(file_path), caption="🎵 Mana musiqangiz!")
+            await cq.message.answer_audio(audio=FSInputFile(file_path), caption=f"🎵 <b>{search_query}</b>\n<i>(YouTube'dan to'liq versiya)</i>", parse_mode="HTML")
             await status_msg.delete()
         else:
-            await status_msg.edit_text("😔 Xatolik yuz berdi yoki fayl katta.")
+            await status_msg.edit_text("😔 To'liq qo'shiqni yuklab bo'lmadi (fayl katta yoki topilmadi).")
+            
     except Exception as e:
         print(f"Audio xatosi: {e}")
-        await status_msg.edit_text("😔 Xatolik.")
+        await status_msg.edit_text("😔 Xatolik yuz berdi.")
     finally:
+        if video_path and os.path.exists(video_path): os.remove(video_path)
         if file_path and os.path.exists(file_path): os.remove(file_path)
 
 @dp.callback_query(F.data.startswith("doc_"))
@@ -311,17 +321,6 @@ async def process_document(cq: CallbackQuery):
         file_cache.pop(cq.data.split("_")[1], None)
     except Exception: await cq.message.reply("😔 Xatolik.")
 
-@dp.callback_query(F.data.startswith("shazam_"))
-async def process_shazam(cq: CallbackQuery):
-    file_path = file_cache.get(cq.data.split("_")[1])
-    if not file_path or not os.path.exists(file_path): return await cq.answer("❌ Fayl topilmadi.", show_alert=True)
-        
-    await cq.answer("🔍 Musiqa aniqlanmoqda...")
-    status_msg = await cq.message.reply("🎧 Ovoz tinglanmoqda va Shazam'dan qidirilmoqda...")
-    
-    result = await asyncio.to_thread(_recognize_music_sync, file_path)
-    await status_msg.edit_text(result, parse_mode="HTML")
-
 # ============================================================
 #  INLINE REJIM
 # ============================================================
@@ -335,12 +334,12 @@ async def inline_handler(query: InlineQuery):
     result = InlineQueryResultArticle(
         id="1", title="🎬 Videoni yuklash",
         description="Havoladan video yuklab olish uchun bosing",
-        input_text_message_content=InputTextMessageContent(message_text=f"Videoni yuklash uchun shu yerga bosing: {link}")
+        input_message_content=InputTextMessageContent(message_text=f"Videoni yuklash uchun shu yerga bosing: {link}")
     )
     await query.answer([result], cache_time=1)
 
 # ============================================================
-#  ADMIN PANEL (Qisqartirilgan)
+#  ADMIN PANEL
 # ============================================================
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
