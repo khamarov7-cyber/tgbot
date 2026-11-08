@@ -4,8 +4,8 @@ import random
 import asyncio
 import sqlite3
 import yt_dlp
-import instaloader
 import subprocess
+import tempfile
 from shazamio import Shazam
 from datetime import datetime
 from fastapi import FastAPI, Request
@@ -22,27 +22,21 @@ import uvicorn
 #  SOZLAMALAR
 # ============================================================
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = 123456789  # <--- O'zingizning Telegram ID raqamingizni yozing!
+ADMIN_ID = 8389911714  # <--- O'zingizning ID raqamingizni yozing!
 BASE_WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 
-# Instagram Login (Render'dagi Environment'dan o'qiladi)
-IG_USERNAME = os.environ.get("IG_USERNAME", "")
-IG_PASSWORD = os.environ.get("IG_PASSWORD", "")
-IG_SESSION_FILE = "/tmp/ig_session"
-
-L = instaloader.Instaloader(
-    download_video_thumbnails=False, 
-    save_metadata=False, 
-    compress_json=False, 
-    post_metadata_txt_pattern=""
-)
+# COOKIES SOZLAMASI
+IG_COOKIES = os.environ.get("IG_COOKIES", "")
+COOKIE_FILE_PATH = "/tmp/ig_cookies.txt"
+if IG_COOKIES:
+    with open(COOKIE_FILE_PATH, "w", encoding="utf-8") as f:
+        f.write(IG_COOKIES)
 
 DOWNLOAD_DIR = "/tmp/tgbot"
 MAX_FILE_SIZE = 50 * 1024 * 1024
 DAILY_LIMIT = 3
 REFERRAL_BONUS = 3
-
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
@@ -54,18 +48,13 @@ file_cache = {}
 maintenance_mode = False 
 
 # ============================================================
-#  MA'LUMOTLAR BAZASI (SQLite)
+#  MA'LUMOTLAR BAZASI (O'zgarmadi)
 # ============================================================
 def init_db():
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT,
-        referrer_id INTEGER, limit_used INTEGER DEFAULT 0, last_reset TEXT, is_banned INTEGER DEFAULT 0
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS channels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT UNIQUE, name TEXT, url TEXT
-    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT, referrer_id INTEGER, limit_used INTEGER DEFAULT 0, last_reset TEXT, is_banned INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT UNIQUE, name TEXT, url TEXT)''')
     conn.commit()
     conn.close()
 
@@ -84,8 +73,7 @@ def add_user(user_id, first_name, username, referrer_id=None):
     today = datetime.now().strftime("%Y-%m-%d")
     user = db_query("SELECT * FROM users WHERE user_id=?", (user_id,))
     if not user:
-        db_query("INSERT INTO users (user_id, first_name, username, referrer_id, last_reset) VALUES (?, ?, ?, ?, ?)",
-                 (user_id, first_name, username, referrer_id, today))
+        db_query("INSERT INTO users (user_id, first_name, username, referrer_id, last_reset) VALUES (?, ?, ?, ?, ?)", (user_id, first_name, username, referrer_id, today))
         if referrer_id:
             db_query("UPDATE users SET limit_used = limit_used - ? WHERE user_id=?", (REFERRAL_BONUS, referrer_id))
         return True
@@ -96,13 +84,10 @@ def check_limit(user_id):
     user = db_query("SELECT limit_used, last_reset, is_banned FROM users WHERE user_id=?", (user_id,))
     if not user: return False, "Ro'yxatdan o'tmagansiz. /start bosing."
     limit_used, last_reset, is_banned = user[0]
-    
     if is_banned: return False, "🚫 Siz botdan bloklangansiz."
-    
     if last_reset != today:
         db_query("UPDATE users SET limit_used=0, last_reset=? WHERE user_id=?", (today, user_id))
         limit_used = 0
-        
     if limit_used >= DAILY_LIMIT:
         return False, f"Kunlik limitingiz tugadi ({DAILY_LIMIT} ta).\nDo'stlaringizni taklif qilib +{REFERRAL_BONUS} tadan limit oling!"
     return True, "OK"
@@ -111,7 +96,7 @@ def increment_limit(user_id):
     db_query("UPDATE users SET limit_used = limit_used + 1 WHERE user_id=?", (user_id,))
 
 # ============================================================
-#  MIDDLEWARE (Obuna va Texnik ishlar)
+#  OBUNA VA MIDDLEWARE (O'zgarmadi)
 # ============================================================
 async def get_not_subscribed(user_id: int) -> list:
     channels = db_query("SELECT channel_id, name, url FROM channels")
@@ -134,24 +119,16 @@ class MainMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         global maintenance_mode
         user_id = event.from_user.id
-        
         if user_id == ADMIN_ID: return await handler(event, data)
-            
         if maintenance_mode:
-            if isinstance(event, types.Message):
-                await event.answer("🛠 Botda texnik ishlar ketmoqda.")
+            if isinstance(event, types.Message): await event.answer("🛠 Botda texnik ishlar ketmoqda.")
             return
-
-        if isinstance(event, types.Message) and event.text and event.text.startswith("/start"):
-            return await handler(event, data)
-            
+        if isinstance(event, types.Message) and event.text and event.text.startswith("/start"): return await handler(event, data)
         if isinstance(event, (types.Message, CallbackQuery)):
             missing = await get_not_subscribed(user_id)
             if missing:
-                if isinstance(event, types.Message):
-                    await event.answer("🔒 <b>Botdan foydalanish uchun obuna bo'ling:</b>", parse_mode="HTML", reply_markup=subscription_keyboard(missing))
-                else:
-                    await event.answer("❗ Avval kanallarga a'zo bo'ling!", show_alert=True)
+                if isinstance(event, types.Message): await event.answer("🔒 <b>Botdan foydalanish uchun obuna bo'ling:</b>", parse_mode="HTML", reply_markup=subscription_keyboard(missing))
+                else: await event.answer("❗ Avval kanallarga a'zo bo'ling!", show_alert=True)
                 return
         return await handler(event, data)
 
@@ -159,61 +136,42 @@ dp.message.middleware(MainMiddleware())
 dp.callback_query.middleware(MainMiddleware())
 
 # ============================================================
-#  YUKLASH MANTIG'I
+#  YUKLASH (YANGILANDI: COOKIES BILAN)
 # ============================================================
-def _download_instagram_sync(url: str) -> str:
-    try:
-        if os.path.exists(IG_SESSION_FILE):
-            L.load_session_from_file(IG_USERNAME, IG_SESSION_FILE)
-        else:
-            L.login(IG_USERNAME, IG_PASSWORD)
-            L.save_session_to_file(IG_SESSION_FILE)
-
-        if "/stories/" in url:
-            username = url.split("/stories/")[1].split("/")[0]
-            profile = instaloader.Profile.from_username(L.context, username)
-            stories = L.get_stories(userids=[profile.userid])
-            for story in stories:
-                for item in story.get_items():
-                    L.download_storyitem(item, target=DOWNLOAD_DIR)
-        else:
-            shortcode = url.split("/")[-2] if url.endswith("/") else url.split("/")[-1].split("?")[0]
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-            L.download_post(post, target=DOWNLOAD_DIR)
-
-        files = sorted([os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.endswith(('.mp4', '.jpg'))], key=os.path.getmtime, reverse=True)
-        return files[0] if files else None
-    except Exception as e:
-        print(f"Instaloader xatosi: {e}")
-        return None
-
-def _download_ytdlp_sync(url: str, mode: str) -> str:
+def _download_sync(url: str, mode: str) -> str:
     uid = uuid.uuid4().hex[:8]
     outtmpl = os.path.join(DOWNLOAD_DIR, f"{uid}_%(id)s.%(ext)s")
     
     if mode == "audio":
-        opts = {"format": "bestaudio/best", "outtmpl": outtmpl, "quiet": True, "noplaylist": True,
-                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]}
+        opts = {
+            "format": "bestaudio/best", 
+            "outtmpl": outtmpl, 
+            "quiet": True, 
+            "noplaylist": True,
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+        }
     else:
-        opts = {"format": "best[filesize<45M]/best[height<=480]/best", "outtmpl": outtmpl, "quiet": True, "noplaylist": True}
+        opts = {
+            "format": "best[filesize<45M]/best[height<=480]/best", 
+            "outtmpl": outtmpl, 
+            "quiet": True, 
+            "noplaylist": True,
+        }
+
+    # COOKIES QO'SHISH
+    if os.path.exists(COOKIE_FILE_PATH) and "instagram.com" in url:
+        opts['cookiefile'] = COOKIE_FILE_PATH
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         path = ydl.prepare_filename(info)
+        
+        # Kengaytmani tekshirish (mp3 ga o'zgargan bo'lishi mumkin)
         if not os.path.exists(path):
             base = os.path.splitext(path)[0]
             for ext in (".mp3", ".m4a", ".mp4", ".webm", ".mkv", ".mov"):
                 if os.path.exists(base + ext): return base + ext
         return path
-
-def _download_sync(url: str, mode: str) -> str:
-    if "/stories/" in url:
-        return _download_instagram_sync(url)
-    else:
-        try:
-            return _download_ytdlp_sync(url, mode)
-        except Exception:
-            return _download_instagram_sync(url)
 
 # ============================================================
 #  SHAZAM (MUSIQA ANIQLASH)
@@ -263,24 +221,10 @@ async def cmd_start(message: types.Message):
             f"🎁 <b>Do'stlaringizni taklif qiling!</b>\nHar bir taklif uchun +{REFERRAL_BONUS} ta limit oling:\n<code>{ref_link}</code>")
     await message.answer(text, parse_mode="HTML")
 
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    text = ("📚 <b>Botdan foydalanish qo'llanmasi:</b>\n\n"
-            "1. Instagram, TikTok yoki YouTube'dan biror video havolasini nusxalang.\n"
-            "2. Uni shu botga tashlang.\n"
-            "3. Bot videoni yuklab bergach, ostidagi tugmalar orqali:\n"
-            "   - 🎵 <b>Musiqa (MP3):</b> Videoning musiqasini yuklab olasiz.\n"
-            "   - 📁 <b>HD Fayl:</b> Videoni siqilmagan holda fayl qilib olasiz.\n"
-            "   - 🔍 <b>Qo'shiqni aniqlash:</b> Videodagi musiqa nomini aniqlaydi.\n\n"
-            "⚠️ <b>Eslatma:</b> Kuniga 3 ta bepul limit bor.")
-    await message.answer(text, parse_mode="HTML")
-
 @dp.callback_query(F.data == "check_sub")
 async def check_sub(cq: CallbackQuery):
     missing = await get_not_subscribed(cq.from_user.id)
-    if missing:
-        await cq.answer("❌ Hali hamma kanalga a'zo bo'lmadingiz!", show_alert=True)
-        return
+    if missing: return await cq.answer("❌ Hali hamma kanalga a'zo bo'lmadingiz!", show_alert=True)
     await cq.answer("✅ Rahmat!")
     await cq.message.edit_text("✅ Obuna tasdiqlandi!\n\n📥 Endi havola yuboring! 🎬")
 
@@ -297,7 +241,7 @@ async def handle_link(message: types.Message):
     file_path = None
     try:
         file_path = await asyncio.to_thread(_download_sync, text, "video")
-        if not file_path or not os.path.exists(file_path): return await status.edit_text("😔 Yuklab bo'lmadi.")
+        if not file_path or not os.path.exists(file_path): return await status.edit_text("😔 Yuklab bo'lmadi. (Ehtimol, video yopiq yoki login talab qiladi).")
         if os.path.getsize(file_path) > MAX_FILE_SIZE: return await status.edit_text("😔 Video 50 MB dan katta.")
 
         session_id = str(uuid.uuid4())[:8]
@@ -318,7 +262,7 @@ async def handle_link(message: types.Message):
         await status.delete()
     except Exception as e:
         await status.edit_text("😔 Xatolik yuz berdi.")
-        await bot.send_message(ADMIN_ID, f"⚠️ Xatolik (Foydalanuvchi: {message.from_user.id}):\n{text}\n\n{e}")
+        await bot.send_message(ADMIN_ID, f"⚠️ Xatolik: {e}")
 
 @dp.callback_query(F.data.startswith("audio_"))
 async def process_audio(cq: CallbackQuery):
@@ -333,12 +277,22 @@ async def process_audio(cq: CallbackQuery):
     file_path = None
     try:
         file_path = await asyncio.to_thread(_download_sync, url, "audio")
+        
+        # Agar fayl .mp3 bo'lmasa, ffmpeg orqali majburan mp3 qilamiz
+        if file_path and not file_path.endswith('.mp3'):
+            audio_path = file_path.rsplit('.', 1)[0] + ".mp3"
+            await asyncio.to_thread(subprocess.run, ["ffmpeg", "-i", file_path, "-q:a", "0", "-map", "a", audio_path, "-y"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(audio_path):
+                os.remove(file_path)
+                file_path = audio_path
+
         if file_path and os.path.exists(file_path) and os.path.getsize(file_path) <= MAX_FILE_SIZE:
             await cq.message.answer_audio(audio=FSInputFile(file_path), caption="🎵 Mana musiqangiz!")
             await status_msg.delete()
         else:
-            await status_msg.edit_text("😔 Xatolik yoki fayl katta.")
-    except Exception:
+            await status_msg.edit_text("😔 Xatolik yuz berdi yoki fayl katta.")
+    except Exception as e:
+        print(f"Audio xatosi: {e}")
         await status_msg.edit_text("😔 Xatolik.")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
@@ -376,30 +330,23 @@ async def inline_handler(query: InlineQuery):
     text = query.query.strip()
     if not (text.startswith("http://") or text.startswith("https://")):
         return await query.answer([], switch_pm_text="Havola yuboring...", switch_pm_parameter="start")
-
     bot_username = (await bot.get_me()).username
     link = f"https://t.me/{bot_username}?start=inline_{text}"
     result = InlineQueryResultArticle(
         id="1", title="🎬 Videoni yuklash",
         description="Havoladan video yuklab olish uchun bosing",
-        input_message_content=InputTextMessageContent(message_text=f"Videoni yuklash uchun shu yerga bosing: {link}")
+        input_text_message_content=InputTextMessageContent(message_text=f"Videoni yuklash uchun shu yerga bosing: {link}")
     )
     await query.answer([result], cache_time=1)
 
 # ============================================================
-#  ADMIN PANEL
+#  ADMIN PANEL (Qisqartirilgan)
 # ============================================================
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
     users_count = db_query("SELECT COUNT(*) FROM users")[0][0]
-    text = (f"👑 <b>Admin Panel</b>\n\n"
-            f"👥 Foydalanuvchilar: {users_count} ta\n"
-            f"🛠 Texnik ishlar: {'Yoqilgan' if maintenance_mode else "O'chirilgan"}\n\n"
-            f"Buyruqlar:\n"
-            f"/stats - Statistika\n/broadcast - Xabar tarqatish\n/maintenance - Texnik rejim\n"
-            f"/addchannel - Kanal qo'shish\n/delchannel - Kanal o'chirish\n/ban [id] - Bloklash\n/unban [id] - Blokdan chiqarish")
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(f"👑 <b>Admin Panel</b>\n\n👥 Foydalanuvchilar: {users_count} ta\n\nBuyruqlar:\n/stats\n/broadcast\n/maintenance\n/addchannel\n/delchannel\n/ban\n/unban", parse_mode="HTML")
 
 @dp.message(Command("stats"))
 async def stats(message: types.Message):
@@ -412,7 +359,7 @@ async def toggle_maintenance(message: types.Message):
     global maintenance_mode
     if message.from_user.id != ADMIN_ID: return
     maintenance_mode = not maintenance_mode
-    await message.answer(f"🛠 Texnik ishlar: {'Yoqildi' if maintenance_mode else "O'chirildi"}")
+    await message.answer(f"🛠 Texnik ishlar: {'Yoqildi' if maintenance_mode else 'O\'chirildi'}")
 
 @dp.message(Command("addchannel"))
 async def add_channel(message: types.Message):
