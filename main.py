@@ -21,7 +21,7 @@ import uvicorn
 #  SOZLAMALAR
 # ============================================================
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = 8389911714  # <--- O'zingizning ID raqamingizni yozing!
+ADMIN_ID = 123456789  # <--- O'zingizning ID raqamingizni yozing!
 BASE_WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 
@@ -143,44 +143,6 @@ def _download_video_sync(url: str) -> str:
                 if os.path.exists(base + ext): return base + ext
         return path
 
-def _download_audio_sync(url: str) -> str:
-    uid = uuid.uuid4().hex[:8]
-    outtmpl = os.path.join(DOWNLOAD_DIR, f"{uid}_%(id)s.%(ext)s")
-    opts = {"format": "bestaudio/best", "outtmpl": outtmpl, "quiet": True, "noplaylist": True,
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
-        if not os.path.exists(path):
-            base = os.path.splitext(path)[0]
-            if os.path.exists(base + ".mp3"): return base + ".mp3"
-        return path
-
-# ============================================================
-#  SHAZAM VA YOUTUBE QIDIRUV
-# ============================================================
-def _recognize_music_sync(video_path: str) -> str:
-    audio_path = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4().hex[:8]}.mp3")
-    try:
-        subprocess.run(["ffmpeg", "-i", video_path, "-q:a", "0", "-map", "a", audio_path, "-y"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        shazam = Shazam()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        out = loop.run_until_complete(shazam.recognize(audio_path))
-        loop.close()
-
-        if 'track' in out:
-            title = out['track'].get('title', 'Noma\'lum')
-            subtitle = out['track'].get('subtitle', 'Noma\'lum')
-            return f"{subtitle} - {title}" # YouTube qidiruvi uchun format
-        return None
-    except Exception as e:
-        print(f"Shazam xatosi: {e}")
-        return None
-    finally:
-        if os.path.exists(audio_path): os.remove(audio_path)
-
 def _download_from_youtube_sync(query: str) -> str:
     uid = uuid.uuid4().hex[:8]
     outtmpl = os.path.join(DOWNLOAD_DIR, f"yt_{uid}_%(id)s.%(ext)s")
@@ -201,7 +163,32 @@ def _download_from_youtube_sync(query: str) -> str:
         return path
 
 # ============================================================
-#  FOYDALANUVCHI HANDLERLARI
+#  SHAZAM (VIDEODAN ANIQLASH)
+# ============================================================
+def _recognize_music_sync(video_path: str) -> str:
+    audio_path = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4().hex[:8]}.mp3")
+    try:
+        subprocess.run(["ffmpeg", "-i", video_path, "-q:a", "0", "-map", "a", audio_path, "-y"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        shazam = Shazam()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        out = loop.run_until_complete(shazam.recognize(audio_path))
+        loop.close()
+
+        if 'track' in out:
+            title = out['track'].get('title', 'Noma\'lum')
+            subtitle = out['track'].get('subtitle', 'Noma\'lum')
+            return f"{subtitle} - {title}"
+        return None
+    except Exception as e:
+        print(f"Shazam xatosi: {e}")
+        return None
+    finally:
+        if os.path.exists(audio_path): os.remove(audio_path)
+
+# ============================================================
+#  HANDLERLAR
 # ============================================================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -218,7 +205,7 @@ async def cmd_start(message: types.Message):
     bot_username = (await bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start={message.from_user.id}"
     text = (f"👋 Salom, <b>{message.from_user.first_name}</b>!\n\n"
-            f"📥 Menga havola tashlang, videoni yuklab beraman.\n"
+            f"📥 Menga havola yoki qo'shiq nomini yozing, men uni topib beraman.\n"
             f"🎵 Video ostidagi tugma orqali musiqani to'liq versiyasini yuklab olishingiz mumkin.\n\n"
             f"🎁 <b>Do'stlaringizni taklif qiling!</b>\nHar bir taklif uchun +{REFERRAL_BONUS} ta limit oling:\n<code>{ref_link}</code>")
     await message.answer(text, parse_mode="HTML")
@@ -228,42 +215,67 @@ async def check_sub(cq: CallbackQuery):
     missing = await get_not_subscribed(cq.from_user.id)
     if missing: return await cq.answer("❌ Hali hamma kanalga a'zo bo'lmadingiz!", show_alert=True)
     await cq.answer("✅ Rahmat!")
-    await cq.message.edit_text("✅ Obuna tasdiqlandi!\n\n📥 Endi havola yuboring! 🎬")
+    await cq.message.edit_text("✅ Obuna tasdiqlandi!\n\n📥 Endi havola yoki qo'shiq nomini yuboring! 🎬")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_link(message: types.Message):
     text = message.text.strip()
-    if not (text.startswith("http://") or text.startswith("https://")):
-        return await message.answer("⚠️ Iltimos, havola (link) yuboring!")
+    
+    # Agar havola bo'lsa (video yuklash)
+    if text.startswith("http://") or text.startswith("https://"):
+        ok, msg = check_limit(message.from_user.id)
+        if not ok: return await message.answer(f"⚠️ {msg}")
 
-    ok, msg = check_limit(message.from_user.id)
-    if not ok: return await message.answer(f"⚠️ {msg}")
+        status = await message.answer("⏳ Video yuklanmoqda, kuting...")
+        file_path = None
+        try:
+            file_path = await asyncio.to_thread(_download_video_sync, text)
+            if not file_path or not os.path.exists(file_path): return await status.edit_text("😔 Yuklab bo'lmadi.")
+            if os.path.getsize(file_path) > MAX_FILE_SIZE: return await status.edit_text("😔 Video 50 MB dan katta.")
 
-    status = await message.answer("⏳ Video yuklanmoqda, kuting...")
-    file_path = None
-    try:
-        file_path = await asyncio.to_thread(_download_video_sync, text)
-        if not file_path or not os.path.exists(file_path): return await status.edit_text("😔 Yuklab bo'lmadi.")
-        if os.path.getsize(file_path) > MAX_FILE_SIZE: return await status.edit_text("😔 Video 50 MB dan katta.")
+            session_id = str(uuid.uuid4())[:8]
+            audio_cache[session_id] = text
+            file_cache[session_id] = file_path
+            increment_limit(message.from_user.id)
 
-        session_id = str(uuid.uuid4())[:8]
-        audio_cache[session_id] = text
-        file_cache[session_id] = file_path
-        increment_limit(message.from_user.id)
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎵 Musiqa (To'liq versiya)", callback_data=f"audio_{session_id}"),
+                 InlineKeyboardButton(text="📁 HD Fayl", callback_data=f"doc_{session_id}")]
+            ])
+            
+            bot_username = (await bot.get_me()).username
+            caption = f'<a href="{text}">📥 @{bot_username} orqali yuklab olindi</a>'
+            
+            await message.answer_video(video=FSInputFile(file_path), caption=caption, parse_mode="HTML", reply_markup=keyboard, supports_streaming=True)
+            await status.delete()
+        except Exception as e:
+            await status.edit_text("😔 Xatolik yuz berdi.")
+            await bot.send_message(ADMIN_ID, f"⚠️ Xatolik: {e}")
+            
+    # Agar oddiy matn bo'lsa (qo'shiq qidirish)
+    else:
+        ok, msg = check_limit(message.from_user.id)
+        if not ok: return await message.answer(f"⚠️ {msg}")
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎵 Musiqa (To'liq versiya)", callback_data=f"audio_{session_id}"),
-             InlineKeyboardButton(text="📁 HD Fayl", callback_data=f"doc_{session_id}")]
-        ])
+        status = await message.answer(f"🔍 <b>{text}</b> qidirilmoqda...", parse_mode="HTML")
         
-        bot_username = (await bot.get_me()).username
-        caption = f'<a href="{text}">📥 @{bot_username} orqali yuklab olindi</a>'
-        
-        await message.answer_video(video=FSInputFile(file_path), caption=caption, parse_mode="HTML", reply_markup=keyboard, supports_streaming=True)
-        await status.delete()
-    except Exception as e:
-        await status.edit_text("😔 Xatolik yuz berdi.")
-        await bot.send_message(ADMIN_ID, f"⚠️ Xatolik: {e}")
+        try:
+            # YouTube'dan qidirib topamiz
+            file_path = await asyncio.to_thread(_download_from_youtube_sync, text)
+            
+            if file_path and os.path.exists(file_path) and os.path.getsize(file_path) <= MAX_FILE_SIZE:
+                await message.answer_audio(
+                    audio=FSInputFile(file_path), 
+                    caption=f"🎵 <b>{text}</b>\n<i>(YouTube'dan topilgan natija)</i>", 
+                    parse_mode="HTML"
+                )
+                await status.delete()
+                increment_limit(message.from_user.id)
+            else:
+                await status.edit_text("😔 Afsus, bu qo'shiqni topa olmadim yoki fayl 50 MB dan katta.")
+        except Exception as e:
+            print(f"Qidiruv xatosi: {e}")
+            await status.edit_text("😔 Qidiruvda xatolik yuz berdi.")
 
 @dp.callback_query(F.data.startswith("audio_"))
 async def process_audio(cq: CallbackQuery):
@@ -327,14 +339,15 @@ async def process_document(cq: CallbackQuery):
 @dp.inline_query()
 async def inline_handler(query: InlineQuery):
     text = query.query.strip()
-    if not (text.startswith("http://") or text.startswith("https://")):
-        return await query.answer([], switch_pm_text="Havola yuboring...", switch_pm_parameter="start")
+    if not text: return await query.answer([], switch_pm_text="Havola yoki qo'shiq nomini yuboring...", switch_pm_parameter="start")
+    
     bot_username = (await bot.get_me()).username
     link = f"https://t.me/{bot_username}?start=inline_{text}"
+    
     result = InlineQueryResultArticle(
-        id="1", title="🎬 Videoni yuklash",
-        description="Havoladan video yuklab olish uchun bosing",
-        input_message_content=InputTextMessageContent(message_text=f"Videoni yuklash uchun shu yerga bosing: {link}")
+        id="1", title="🎬 Yuklab olish",
+        description="Natijani olish uchun bosing",
+        input_message_content=InputTextMessageContent(message_text=f"Natijani olish uchun shu yerga bosing: {link}")
     )
     await query.answer([result], cache_time=1)
 
@@ -430,3 +443,4 @@ async def on_shutdown(): await bot.delete_webhook()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+```
